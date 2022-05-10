@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -41,8 +40,6 @@ type Agent struct {
 	// hooks
 	postStartHooks []hook
 	preStopHooks   []hook
-	// states
-	done chan struct{}
 }
 
 // New todo..
@@ -74,7 +71,6 @@ func New(cmd *exec.Cmd, port int, consulCluster []string, logger *logrus.Logger,
 		nodeName:      nodeName,
 		advertiseIP:   localIP,
 		consulCluster: urls,
-		done:          make(chan struct{}, 1),
 	}
 	for _, fn := range funcs {
 		fn(a)
@@ -87,24 +83,6 @@ func (a *Agent) setDefault() {
 	if a.service == "" {
 		a.service = filepath.Base(a.cmd.Path)
 	}
-}
-
-func (a *Agent) watchSignal(sigCh chan os.Signal) {
-	var once sync.Once
-	for sig := range sigCh {
-		a.logger.Info("🤯 Oops! received signal: ", sig)
-		if err := a.runPreStopHooks(); err != nil {
-			a.logger.Errorf("Error occurred while executing prestophooks: %v", err)
-		}
-		once.Do(func() {
-			if a.cmd.Process != nil && a.cmd.ProcessState == nil {
-				if err := a.cmd.Process.Signal(sig); err != nil {
-					a.logger.Errorf("Failed to sending signal to process: %v", err)
-				}
-			}
-		})
-	}
-	a.done <- struct{}{}
 }
 
 // AddPostStartHook ..
@@ -213,39 +191,37 @@ func (a *Agent) DeRegister() error {
 // Run ..
 func (a *Agent) Run() (err error) {
 	a.logger.Debugf("command args: %v, envs: %v", a.cmd.Args, a.cmd.Env)
-	sigCh := make(chan os.Signal, 2)
+	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	go a.watchSignal(sigCh)
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- a.cmd.Run()
 	}()
-	defer func() {
-		if err != nil {
-			sigCh <- syscall.SIGKILL
-		}
-		close(sigCh)
-	}()
-	select {
-	case err = <-errCh:
-		return
-	// todo: pass through when process had been started
-	case <-time.After(3 * time.Second):
-		a.logger.Info("🚀 Looks like everything's fine")
-	}
-	if err = a.runPostStartHooks(); err != nil {
-		return
-	}
-	select {
-	case err = <-errCh:
-		return
-	}
-}
 
-// Wait todo...
-func (a *Agent) Wait() error {
-	<-a.done
-	return nil
+	select {
+	case err = <-errCh:
+		return err
+	case <-sigCh:
+		return nil
+	case <-time.After(3 * time.Second):
+		a.logger.Info("Seems like everything's fine")
+	}
+	// command starts successfully
+	defer a.cmd.Process.Kill()
+
+	if err = a.runPostStartHooks(); err != nil {
+		return err
+	}
+
+	defer a.runPreStopHooks()
+	select {
+	case err = <-errCh:
+		return err
+	case sig := <-sigCh:
+		a.logger.Infof("Receive signal %s, exiting gracefully", sig)
+		return nil
+	}
 }
 
 func init() {

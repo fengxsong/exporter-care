@@ -82,17 +82,7 @@ func run(logger *logrus.Logger, name string, o *options) error {
 		ag.AddPostStartHook(ag.Register)
 		ag.AddPreStopHook(ag.DeRegister)
 	}
-	if err = ag.Run(); err != nil {
-		logger.Info("Wait for process to terminated")
-		return ag.Wait()
-		// if exiterr, ok := err.(*exec.ExitError); ok {
-		// 	if _, ok := exiterr.Sys().(syscall.WaitStatus); ok {
-		// 		return err
-		// 	}
-		// }
-	}
-	logger.Info("Graceful shutdown")
-	return nil
+	return ag.Run()
 }
 
 func setFlagsFromEnv(fs *pflag.FlagSet, prefix string) {
